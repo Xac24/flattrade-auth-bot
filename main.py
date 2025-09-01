@@ -1,63 +1,76 @@
 # main.py
-# Playwright-based automation for AlgoTest -> Flattrade daily auth
-# Uses environment variables for secrets and account list.
+# Playwright-based automation for AlgoTest -> Flattrade 3-account daily auth
+# Reads credentials from environment variables.
+# Sends optional Telegram notification.
 
-import os, json, time, traceback, requests
+import os
+import json
+import time
+import traceback
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ----------------------------
-# Configuration from env
-# ----------------------------
-ALGO_EMAIL = os.getenv("ALGO_EMAIL")
-ALGO_PASSWORD = os.getenv("ALGO_PASSWORD")
-ACCOUNT_JSON = os.getenv("ACCOUNT_JSON")  # JSON array string
-ALGOTEST_LOGIN_URL = os.getenv("ALGOTEST_LOGIN_URL", "https://algotest.in/broker")
+# ---------- Config from env ----------
+ALGOTEST_URL = os.getenv("ALGOTEST_LOGIN_URL", "https://algotest.in/broker")
+ALGOTEST_PHONE = os.getenv("ALGOTEST_PHONE")           # AlgoTest login phone
+ALGOTEST_PASSWORD = os.getenv("ALGOTEST_PASSWORD")     # AlgoTest login password
+ACCOUNT_JSON = os.getenv("ACCOUNT_JSON")               # JSON array for 3 Flattrade accounts
+HEADLESS = os.getenv("HEADLESS", "1") != "0"           # "0" to disable headless for debugging
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-HEADLESS = os.getenv("HEADLESS", "1") != "0"
 
-if not ALGO_EMAIL or not ALGO_PASSWORD or not ACCOUNT_JSON:
-    raise SystemExit("Set ALGO_EMAIL, ALGO_PASSWORD and ACCOUNT_JSON environment variables before running.")
+# ---------- sanity checks ----------
+if not ACCOUNT_JSON:
+    raise SystemExit("Set ACCOUNT_JSON environment variable (JSON array of accounts).")
 
 try:
-    accounts = json.loads(ACCOUNT_JSON)
-    assert isinstance(accounts, list)
-except Exception as e:
-    print("Failed to parse ACCOUNT_JSON. It must be a JSON array of objects.")
-    raise
+    ACCOUNTS = json.loads(ACCOUNT_JSON)
+    if not isinstance(ACCOUNTS, list) or len(ACCOUNTS) == 0:
+        raise ValueError()
+except Exception:
+    raise SystemExit("ACCOUNT_JSON must be a valid JSON array of account objects.")
 
-def send_telegram(msg: str):
+# ACCOUNT object example:
+# {"userid":"fl_user1","password":"fl_pass1","totp":"123456"}
+
+# ---------- helpers ----------
+def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-    except Exception:
-        print("Telegram send failed")
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+    except Exception as e:
+        print("Telegram send failed:", e)
 
-def first_fill(page, selectors, value):
+def first_fill(page, selectors, value, timeout=3000):
     for s in selectors:
         try:
-            el = page.locator(s)
-            if el.count() and el.is_visible():
-                el.fill(value)
+            locator = page.locator(s)
+            if locator.count() and locator.first.is_visible():
+                locator.first.fill(value, timeout=timeout)
                 return True
         except Exception:
             pass
     return False
 
-def first_click(page, selectors):
+def first_click(page, selectors, timeout=5000):
     for s in selectors:
         try:
-            el = page.locator(s)
-            if el.count() and el.is_visible():
-                el.click()
+            locator = page.locator(s)
+            if locator.count() and locator.first.is_visible():
+                locator.first.click(timeout=timeout)
                 return True
         except Exception:
             pass
     return False
 
 def attempt_login_on_flattrade(fpage, acc):
+    """
+    fpage: Playwright Page (Flattrade login)
+    acc: {"userid","password","totp"}
+    """
     user_selectors = [
         "input[name='user_id']",
         "input[name='userid']",
@@ -86,11 +99,13 @@ def attempt_login_on_flattrade(fpage, acc):
     ]
 
     try:
-        fpage.wait_for_timeout(700)
-        if not first_fill(fpage, user_selectors, acc.get("username","")):
-            txts = fpage.locator("input[type='text'], input:not([type])")
-            if txts.count():
-                txts.first.fill(acc.get("username",""))
+        fpage.wait_for_timeout(700)  # small wait
+        # username
+        if not first_fill(fpage, user_selectors, acc.get("userid","")):
+            # fallback: fill first text input
+            txt = fpage.locator("input[type='text'], input:not([type])")
+            if txt.count():
+                txt.first.fill(acc.get("userid",""))
         time.sleep(0.2)
         first_fill(fpage, pass_selectors, acc.get("password",""))
         time.sleep(0.2)
@@ -103,7 +118,8 @@ def attempt_login_on_flattrade(fpage, acc):
                 fpage.keyboard.press("Enter")
             except:
                 pass
-        for _ in range(40):
+        # Wait for redirect back to AlgoTest or closure
+        for _ in range(40):  # wait up to ~20s
             try:
                 if "algotest" in fpage.url.lower() or "dashboard" in fpage.url.lower():
                     return True
@@ -114,105 +130,133 @@ def attempt_login_on_flattrade(fpage, acc):
             time.sleep(0.5)
         return True
     except Exception as e:
-        print("Exception during Flattrade login attempt:", e)
+        print("Error during Flattrade login:", e)
         traceback.print_exc()
         return False
 
+# ---------- main ----------
 def main():
-    result = {"success": [], "fail": []}
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS, args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage"])
-        context = browser.new_context()
-        page = context.new_page()
-        page.set_default_timeout(20000)
+    successes = []
+    fails = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=HEADLESS, args=["--no-sandbox","--disable-setuid-sandbox"])
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(30000)
 
-        print("Opening AlgoTest page...")
-        page.goto(ALGOTEST_LOGIN_URL)
-        time.sleep(1)
+            print("Opening AlgoTest:", ALGOTEST_URL)
+            page.goto(ALGOTEST_URL)
 
-        try:
-            login_attempted = False
-            if page.locator("input[name='email']").count():
-                page.fill("input[name='email']", ALGO_EMAIL); login_attempted = True
-            elif page.locator("input[name='username']").count():
-                page.fill("input[name='username']", ALGO_EMAIL); login_attempted = True
-            if login_attempted:
-                if page.locator("input[name='password']").count():
-                    page.fill("input[name='password']", ALGO_PASSWORD)
-                elif page.locator("input[type='password']").count():
-                    page.fill("input[type='password']", ALGO_PASSWORD)
-                if page.locator("button:has-text('Login')").count():
-                    page.click("button:has-text('Login')")
-                elif page.locator("button[type='submit']").count():
-                    page.click("button[type='submit']")
-                print("Clicked AlgoTest login; waiting for dashboard...")
-                page.wait_for_load_state("networkidle")
-                time.sleep(2)
-            else:
-                print("No AlgoTest credential fields detected (already logged in?).")
-        except PWTimeout:
-            print("Timeout while trying to login to AlgoTest - continuing assuming already logged in.")
-        except Exception as e:
-            print("Error attempting AlgoTest login:", e)
-
-        page.wait_for_load_state("networkidle")
-        time.sleep(2)
-
-        btns = page.locator("button:has-text('Login')")
-        count = btns.count()
-        print(f"Found {count} 'Login' buttons on the page.")
-        if count == 0:
-            lks = page.locator("a:has-text('Login')")
-            count = lks.count()
-            print(f"Found {count} 'Login' links instead.")
-            btns = lks
-
-        to_process = min(count, len(accounts))
-        if to_process == 0:
-            print("Nothing to process. Exiting.")
-            send_telegram("Flattrade Auth: nothing to process on AlgoTest page.")
-            browser.close()
-            return
-
-        for i in range(to_process):
-            acc = accounts[i]
-            print(f"Processing account #{i+1}: {acc.get('username')}")
+            # If Algotest shows login form (phone + password), fill it
             try:
-                with context.expect_page() as new_page_info:
-                    selector = f"(//button[contains(normalize-space(.),'Login')])[{i+1}]"
-                    try:
-                        page.locator(selector).click(timeout=10000)
-                    except Exception:
-                        page.locator("button:has-text('Login')").nth(i).click()
-                fpage = new_page_info.value
-                fpage.wait_for_load_state("domcontentloaded", timeout=15000)
-                time.sleep(1.0)
-                print("Flattrade page opened. URL:", fpage.url)
-                success = attempt_login_on_flattrade(fpage, acc)
-                if success:
-                    print(f"Account {acc.get('username')} authenticated (attempted).")
-                    result["success"].append(acc.get("username"))
-                else:
-                    print(f"Account {acc.get('username')} failed to authenticate.")
-                    result["fail"].append(acc.get("username"))
-                try:
-                    if not fpage.is_closed():
-                        fpage.close()
-                except:
-                    pass
-                time.sleep(2)
-            except Exception as e:
-                print(f"Exception while processing account #{i+1}: {e}")
-                traceback.print_exc()
-                result["fail"].append(acc.get("username"))
-                time.sleep(2)
-        browser.close()
+                if page.locator("input[name='phone']").count() or page.locator("input[name='email']").count() or page.locator("input[name='username']").count():
+                    # prefer phone field if present
+                    if page.locator("input[name='phone']").count():
+                        page.fill("input[name='phone']", ALGOTEST_PHONE or "")
+                    elif page.locator("input[name='email']").count():
+                        page.fill("input[name='email']", ALGOTEST_PHONE or "")
+                    elif page.locator("input[name='username']").count():
+                        page.fill("input[name='username']", ALGOTEST_PHONE or "")
 
-    msg = f"Flattrade Auth Done. Success: {len(result['success'])}, Fail: {len(result['fail'])}\n"
-    msg += "Success list:\n" + "\n".join(result["success"]) + "\n"
-    msg += "Fail list:\n" + "\n".join(result["fail"])
+                    # password
+                    if page.locator("input[type='password']").count():
+                        page.fill("input[type='password']", ALGOTEST_PASSWORD or "")
+                    # click login
+                    if page.locator("button:has-text('Login')").count():
+                        page.click("button:has-text('Login')")
+                    elif page.locator("button[type='submit']").count():
+                        page.click("button[type='submit']")
+                    page.wait_for_load_state("networkidle")
+                    time.sleep(2)
+                else:
+                    print("No AlgoTest credential fields detected (already logged in?).")
+            except PWTimeout:
+                print("Timeout while logging in to AlgoTest - continuing.")
+
+            # Wait for the broker list to appear
+            print("Waiting for Broker page to load (Flattrade)...")
+            page.wait_for_selector("text=Flattrade", timeout=30000)
+            time.sleep(1)
+            # Click the Flattrade element (expands to show 3 accounts)
+            try:
+                page.locator("text=Flattrade").first.click()
+                time.sleep(1.0)
+            except Exception:
+                print("Could not click Flattrade element; continuing and attempting to find Login buttons.")
+
+            # Find Login buttons (prefer those visible now)
+            login_buttons = page.locator("button:has-text('Login')")
+            count = login_buttons.count()
+            print("Found total 'Login' buttons on page:", count)
+            # We'll attempt up to 3 accounts (as requested)
+            to_do = min(3, len(ACCOUNTS), count)
+            if to_do == 0:
+                print("No login buttons found to process. Exiting.")
+                send_telegram("Flattrade Auth: no Login buttons found on AlgoTest page.")
+                return
+
+            for i in range(to_do):
+                acc = ACCOUNTS[i]
+                print(f"Processing account #{i+1} userid={acc.get('userid')}")
+                try:
+                    # attempt to capture a new page (pop-up/new tab) on click
+                    new_page = None
+                    try:
+                        with context.expect_page(timeout=7000) as new_page_info:
+                            # refetch locator to avoid stale handles
+                            login_buttons = page.locator("button:has-text('Login')")
+                            login_buttons.nth(i).click()
+                        new_page = new_page_info.value
+                    except Exception:
+                        # no new page opened; maybe same tab navigation
+                        try:
+                            login_buttons = page.locator("button:has-text('Login')")
+                            login_buttons.nth(i).click()
+                        except Exception as e:
+                            print("Failed to click login button:", e)
+                        new_page = page
+
+                    # ensure page is ready
+                    try:
+                        new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except:
+                        pass
+                    time.sleep(1)
+                    print("Flattrade page URL:", new_page.url)
+                    ok = attempt_login_on_flattrade(new_page, acc)
+                    if ok:
+                        successes.append(acc.get("userid"))
+                        print("OK:", acc.get("userid"))
+                    else:
+                        fails.append(acc.get("userid"))
+                        print("Failed:", acc.get("userid"))
+                    # close new tab if it was a separate window
+                    if new_page is not page:
+                        try:
+                            if not new_page.is_closed():
+                                new_page.close()
+                        except:
+                            pass
+                    # small pause
+                    time.sleep(2)
+                except Exception as e:
+                    print("Exception while processing account:", e)
+                    traceback.print_exc()
+                    fails.append(acc.get("userid"))
+                    time.sleep(2)
+
+            browser.close()
+    except Exception as e:
+        print("Fatal exception:", e)
+        traceback.print_exc()
+        send_telegram("Flattrade Auth: fatal error. Check logs.")
+        raise
+
+    # summary
+    msg = f"Flattrade Auth Completed. Success: {len(successes)}, Fail: {len(fails)}\nSuccesses: {successes}\nFails: {fails}"
     print(msg)
     send_telegram(msg)
 
-if name == "__main__":
+if __name__ == "__main__":
     main()
