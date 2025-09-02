@@ -14,7 +14,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 ALGOTEST_PHONE = os.getenv("ALGOTEST_PHONE")           # AlgoTest login phone
 ALGOTEST_PASSWORD = os.getenv("ALGOTEST_PASSWORD")     # AlgoTest login password
 ACCOUNT_JSON = os.getenv("ACCOUNT_JSON")               # JSON array for 3 Flattrade accounts
-HEADLESS = os.getenv("HEADLESS", "1") != "0"           # "0" to disable headless for debugging
+HEADLESS = False   # force visible browser for debugging           # "0" to disable headless for debugging
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -270,3 +270,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
