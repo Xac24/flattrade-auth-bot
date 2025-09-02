@@ -30,9 +30,6 @@ try:
 except Exception:
     raise SystemExit("ACCOUNT_JSON must be a valid JSON array of account objects.")
 
-# ACCOUNT object example:
-# {"userid":"fl_user1","password":"fl_pass1","totp":"123456"}
-
 # ---------- helpers ----------
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -66,10 +63,6 @@ def first_click(page, selectors, timeout=5000):
     return False
 
 def attempt_login_on_flattrade(fpage, acc):
-    """
-    fpage: Playwright Page (Flattrade login)
-    acc: {"userid","password","totp"}
-    """
     user_selectors = [
         "input[name='user_id']",
         "input[name='userid']",
@@ -98,7 +91,7 @@ def attempt_login_on_flattrade(fpage, acc):
     ]
 
     try:
-        fpage.wait_for_timeout(700)  # small wait
+        fpage.wait_for_timeout(700)
         if not first_fill(fpage, user_selectors, acc.get("userid","")):
             txt = fpage.locator("input[type='text'], input:not([type])")
             if txt.count():
@@ -115,7 +108,7 @@ def attempt_login_on_flattrade(fpage, acc):
                 fpage.keyboard.press("Enter")
             except:
                 pass
-        for _ in range(40):  # wait up to ~20s
+        for _ in range(40):
             try:
                 if "algotest" in fpage.url.lower() or "dashboard" in fpage.url.lower():
                     return True
@@ -148,28 +141,37 @@ def main():
             print("Opening AlgoTest homepage...")
             page.goto("https://algotest.in")
 
-            # STEP 2: Click Login button and login
+            # STEP 2: Locate and click Login
             try:
+                print("Looking for Login button...")
                 if page.locator("text=Login").count():
                     page.locator("text=Login").first.click()
-                    print("Clicked Login button")
-                    page.wait_for_load_state("networkidle")
-                    time.sleep(2)
-
-                    if page.locator("input[name='phone']").count():
-                        page.fill("input[name='phone']", ALGOTEST_PHONE or "")
-                    if page.locator("input[type='password']").count():
-                        page.fill("input[type='password']", ALGOTEST_PASSWORD or "")
-                    if page.locator("button:has-text('Login')").count():
-                        page.locator("button:has-text('Login')").click()
-                    page.wait_for_load_state("networkidle")
-                    time.sleep(3)
+                elif page.locator("button:has-text('Login')").count():
+                    page.locator("button:has-text('Login')").first.click()
+                elif page.locator("a:has-text('Login')").count():
+                    page.locator("a:has-text('Login')").first.click()
                 else:
-                    print("Login button not found (maybe already logged in).")
+                    raise Exception("Login button not found on homepage")
+
+                print("Clicked Login button")
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+
+                # Fill login form
+                if page.locator("input[name='phone']").count():
+                    page.fill("input[name='phone']", ALGOTEST_PHONE or "")
+                if page.locator("input[type='password']").count():
+                    page.fill("input[type='password']", ALGOTEST_PASSWORD or "")
+                if page.locator("button:has-text('Login')").count():
+                    page.locator("button:has-text('Login')").click()
+
+                page.wait_for_load_state("networkidle")
+                time.sleep(3)
+
             except Exception as e:
                 print("Could not complete login:", e)
 
-            # STEP 3: Click on "Algo Trade"
+            # STEP 3: Click Algo Trade
             try:
                 page.wait_for_selector("text=Algo Trade", timeout=15000)
                 page.locator("text=Algo Trade").first.click()
@@ -178,7 +180,7 @@ def main():
             except Exception as e:
                 print("Could not click Algo Trade:", e)
 
-            # STEP 4: Click on "Broker Login"
+            # STEP 4: Click Broker Login
             try:
                 page.wait_for_selector("text=Broker Login", timeout=15000)
                 page.locator("text=Broker Login").first.click()
@@ -219,7 +221,7 @@ def main():
                         with context.expect_page(timeout=7000) as new_page_info:
                             login_buttons = page.locator("button:has-text('Login')")
                             login_buttons.nth(i).click()
-                            new_page = new_page_info.value
+                        new_page = new_page_info.value
                     except Exception:
                         try:
                             login_buttons = page.locator("button:has-text('Login')")
