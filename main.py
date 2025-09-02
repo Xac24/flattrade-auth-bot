@@ -11,7 +11,6 @@ import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # ---------- Config from env ----------
-ALGOTEST_URL = os.getenv("ALGOTEST_LOGIN_URL", "https://algotest.in/broker")
 ALGOTEST_PHONE = os.getenv("ALGOTEST_PHONE")           # AlgoTest login phone
 ALGOTEST_PASSWORD = os.getenv("ALGOTEST_PASSWORD")     # AlgoTest login password
 ACCOUNT_JSON = os.getenv("ACCOUNT_JSON")               # JSON array for 3 Flattrade accounts
@@ -100,9 +99,7 @@ def attempt_login_on_flattrade(fpage, acc):
 
     try:
         fpage.wait_for_timeout(700)  # small wait
-        # username
         if not first_fill(fpage, user_selectors, acc.get("userid","")):
-            # fallback: fill first text input
             txt = fpage.locator("input[type='text'], input:not([type])")
             if txt.count():
                 txt.first.fill(acc.get("userid",""))
@@ -118,7 +115,6 @@ def attempt_login_on_flattrade(fpage, acc):
                 fpage.keyboard.press("Enter")
             except:
                 pass
-        # Wait for redirect back to AlgoTest or closure
         for _ in range(40):  # wait up to ~20s
             try:
                 if "algotest" in fpage.url.lower() or "dashboard" in fpage.url.lower():
@@ -140,56 +136,74 @@ def main():
     fails = []
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=HEADLESS, args=["--no-sandbox","--disable-setuid-sandbox"])
+            browser = p.chromium.launch(
+                headless=HEADLESS,
+                args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage"]
+            )
             context = browser.new_context()
             page = context.new_page()
             page.set_default_timeout(30000)
 
-            print("Opening AlgoTest:", ALGOTEST_URL)
-            page.goto(ALGOTEST_URL)
+            # STEP 1: Open AlgoTest homepage
+            print("Opening AlgoTest homepage...")
+            page.goto("https://algotest.in")
 
-            # If Algotest shows login form (phone + password), fill it
+            # STEP 2: Click Login button and login
             try:
-                if page.locator("input[name='phone']").count() or page.locator("input[name='email']").count() or page.locator("input[name='username']").count():
-                    # prefer phone field if present
-                    if page.locator("input[name='phone']").count():
-                        page.fill("input[name='phone']", ALGOTEST_PHONE or "")
-                    elif page.locator("input[name='email']").count():
-                        page.fill("input[name='email']", ALGOTEST_PHONE or "")
-                    elif page.locator("input[name='username']").count():
-                        page.fill("input[name='username']", ALGOTEST_PHONE or "")
-
-                    # password
-                    if page.locator("input[type='password']").count():
-                        page.fill("input[type='password']", ALGOTEST_PASSWORD or "")
-                    # click login
-                    if page.locator("button:has-text('Login')").count():
-                        page.click("button:has-text('Login')")
-                    elif page.locator("button[type='submit']").count():
-                        page.click("button[type='submit']")
+                if page.locator("text=Login").count():
+                    page.locator("text=Login").first.click()
+                    print("Clicked Login button")
                     page.wait_for_load_state("networkidle")
                     time.sleep(2)
-                else:
-                    print("No AlgoTest credential fields detected (already logged in?).")
-            except PWTimeout:
-                print("Timeout while logging in to AlgoTest - continuing.")
 
-            # Wait for the broker list to appear
+                    if page.locator("input[name='phone']").count():
+                        page.fill("input[name='phone']", ALGOTEST_PHONE or "")
+                    if page.locator("input[type='password']").count():
+                        page.fill("input[type='password']", ALGOTEST_PASSWORD or "")
+                    if page.locator("button:has-text('Login')").count():
+                        page.locator("button:has-text('Login')").click()
+                    page.wait_for_load_state("networkidle")
+                    time.sleep(3)
+                else:
+                    print("Login button not found (maybe already logged in).")
+            except Exception as e:
+                print("Could not complete login:", e)
+
+            # STEP 3: Click on "Algo Trade"
+            try:
+                page.wait_for_selector("text=Algo Trade", timeout=15000)
+                page.locator("text=Algo Trade").first.click()
+                print("Clicked Algo Trade")
+                time.sleep(2)
+            except Exception as e:
+                print("Could not click Algo Trade:", e)
+
+            # STEP 4: Click on "Broker Login"
+            try:
+                page.wait_for_selector("text=Broker Login", timeout=15000)
+                page.locator("text=Broker Login").first.click()
+                print("Clicked Broker Login")
+                page.wait_for_load_state("networkidle")
+                time.sleep(3)
+            except Exception as e:
+                print("Could not click Broker Login:", e)
+
+            # STEP 5: Flattrade flow
             print("Waiting for Broker page to load (Flattrade)...")
             page.wait_for_selector("text=Flattrade", timeout=30000)
             time.sleep(1)
-            # Click the Flattrade element (expands to show 3 accounts)
+
             try:
                 page.locator("text=Flattrade").first.click()
+                print("Clicked Flattrade broker")
                 time.sleep(1.0)
             except Exception:
-                print("Could not click Flattrade element; continuing and attempting to find Login buttons.")
+                print("Could not click Flattrade element; continuing.")
 
-            # Find Login buttons (prefer those visible now)
+            # STEP 6: Loop over 3 accounts
             login_buttons = page.locator("button:has-text('Login')")
             count = login_buttons.count()
             print("Found total 'Login' buttons on page:", count)
-            # We'll attempt up to 3 accounts (as requested)
             to_do = min(3, len(ACCOUNTS), count)
             if to_do == 0:
                 print("No login buttons found to process. Exiting.")
@@ -200,16 +214,13 @@ def main():
                 acc = ACCOUNTS[i]
                 print(f"Processing account #{i+1} userid={acc.get('userid')}")
                 try:
-                    # attempt to capture a new page (pop-up/new tab) on click
                     new_page = None
                     try:
                         with context.expect_page(timeout=7000) as new_page_info:
-                            # refetch locator to avoid stale handles
                             login_buttons = page.locator("button:has-text('Login')")
                             login_buttons.nth(i).click()
-                        new_page = new_page_info.value
+                            new_page = new_page_info.value
                     except Exception:
-                        # no new page opened; maybe same tab navigation
                         try:
                             login_buttons = page.locator("button:has-text('Login')")
                             login_buttons.nth(i).click()
@@ -217,7 +228,6 @@ def main():
                             print("Failed to click login button:", e)
                         new_page = page
 
-                    # ensure page is ready
                     try:
                         new_page.wait_for_load_state("domcontentloaded", timeout=15000)
                     except:
@@ -231,14 +241,12 @@ def main():
                     else:
                         fails.append(acc.get("userid"))
                         print("Failed:", acc.get("userid"))
-                    # close new tab if it was a separate window
                     if new_page is not page:
                         try:
                             if not new_page.is_closed():
                                 new_page.close()
                         except:
                             pass
-                    # small pause
                     time.sleep(2)
                 except Exception as e:
                     print("Exception while processing account:", e)
